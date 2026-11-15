@@ -36,6 +36,36 @@ Port 2 is a PIO UART. It exists because the radar is soldered with TX on pad 2
 and RX on pad 1 (the wiring instructions gave physical pin numbers and the
 board is labelled in GPIO numbers), and no hardware UART can use those pads.
 
+## Fusion display
+
+    python3 fusion/server.py        # then open http://localhost:5187
+
+`pico/fusion.py` streams all three sensors at 30 samples a second (the radar
+and flow sensor each through a PIO receiver drained by DMA into a ring
+buffer, so nothing is lost while the loop reads the lidar and prints).
+`fusion/server.py` relays the stream to the browser; `fusion/index.html` does
+the fusion and drawing. All three sensors should face the same way.
+
+What it combines:
+
+- **Radar + lidar.** A radar mover within 8 deg of dead ahead whose range is
+  within 1 m of the lidar reading is taken to be what the lidar is hitting.
+  Its range becomes the lidar's (centimetres instead of whole metres) and its
+  closing speed is shown from both sensors.
+- **Lidar without radar.** A lidar return with no mover there is a surface
+  that is standing still, which the radar cannot see at all.
+- **Flow x lidar, rig held still.** Image motion (rad/s) times lidar distance
+  is the sideways speed of whatever fills the view, drawn as the across-beam
+  part of the velocity arrow.
+- **Flow as heading, rig being turned.** Image motion is integrated into a
+  heading, and each static lidar hit is placed on a map that stays put, so
+  panning the rig by hand sweeps out the room. "Calibrate turn" learns which
+  way the flow camera sees a right turn.
+
+Limits: the flow camera cannot tell the rig turning from the scene moving, so
+the two modes are a switch, not something it works out; heading drifts; radar
+left/right sign is unverified (there is a flip button).
+
 ## Modules on the bench
 
 - **HLK-LD2451** radar: 5 V supply (>300 mA capacity, ~107 mA average), 3.3 V

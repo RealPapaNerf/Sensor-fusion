@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sensor Fusion</title>
+<style>
+  :root {
+    --bg: #0c1016; --panel: #141a23; --line: #232c3a; --text: #dbe4ee; --dim: #7f8ea3;
+    --lidar: #4cc9f0; --approach: #ff9f1c; --recede: #6c8cff; --fused: #7ae582; --map: #8fa3bd; --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: auto minmax(0, 1fr) 170px;
+    height: 100%; gap: 10px; padding: 10px; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  .status { font-size: 12px; padding: 3px 9px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
+  .status.live { color: var(--fused); border-color: #2b5a36; }
+  .status.lost { color: var(--bad); border-color: #6a2d2d; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; border-right: 1px solid var(--line); border-radius: 0; }
+  .seg button:last-child { border-right: 0; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1b2330; }
+  button.on { background: #24405c; color: #fff; }
+  .lbl { font-size: 12px; color: var(--dim); margin-right: 4px; }
+  .plan, .strip, aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; position: relative; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  aside { grid-row: 2 / 4; grid-column: 2; overflow-y: auto; padding: 12px; }
+  .strip { grid-column: 1; }
+  .card { border-bottom: 1px solid var(--line); padding: 10px 0; }
+  .card:first-child { padding-top: 0; }
+  .card:last-child { border-bottom: 0; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim); margin: 0 0 4px; font-weight: 600; }
+  .big { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .big small { font-size: 14px; font-weight: 400; color: var(--dim); }
+  .sub { color: var(--dim); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: baseline; }
+  #fusionText { font-size: 14.5px; }
+  #fusionText p { margin: 0 0 6px; }
+  #targets div { font-variant-numeric: tabular-nums; font-size: 13px; }
+  .note { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .overlay { position: absolute; left: 12px; top: 10px; font-size: 12px; color: var(--dim); pointer-events: none; }
+  .banner { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: #24405c; color: #fff;
+    padding: 8px 14px; border-radius: 8px; font-size: 14px; display: none; text-align: center; max-width: 80%; }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto 55vh 150px auto; height: auto; }
+    aside { grid-row: auto; grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Sensor fusion</h1>
+    <span id="status" class="status">connecting</span>
+    <span><span class="lbl">Rig is</span><span class="seg" id="modeSeg">
+      <button data-mode="stare" class="on" title="The rig sits still. Sideways image motion is treated as things moving.">held still</button>
+      <button data-mode="sweep" title="You turn the rig by hand. Image motion is treated as the rig turning, and lidar hits build a map.">being turned</button>
+    </span></span>
+    <span><span class="lbl">Range</span><span class="seg" id="rangeSeg">
+      <button data-r="3">3 m</button><button data-r="6" class="on">6 m</button><button data-r="12">12 m</button>
+    </span></span>
+    <button id="calBtn" title="Teach the display which way the flow camera sees a right turn">Calibrate turn</button>
+    <button id="zeroBtn">Reset heading</button>
+    <button id="clearBtn">Clear map</button>
+    <button id="flipBtn" title="Swap radar left and right if targets appear mirrored">Flip radar L/R</button>
+  </header>
+
+  <div class="plan">
+    <canvas id="plan"></canvas>
+    <div class="overlay" id="planNote">top-down view · forward is up</div>
+    <div class="banner" id="banner"></div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>Fused picture</h2>
+      <div id="fusionText"><p>Waiting for data.</p></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot" style="background:var(--lidar)"></span>Lidar · distance dead ahead</h2>
+      <div class="big" id="lidarBig">–</div>
+      <div class="sub" id="lidarSub">&nbsp;</div>
+    </div>
+    <div class="card">
+      <h2><span class="dot" style="background:var(--approach)"></span>Radar · moving things</h2>
+      <div class="big" id="radarBig">–</div>
+      <div id="targets"></div>
+      <div class="note">Radar range comes in whole metres; the boxes on the map show that uncertainty.</div>
+    </div>
+    <div class="card">
+      <h2><span class="dot" style="background:var(--map)"></span>Optical flow · image motion</h2>
+      <div class="big" id="flowBig">–</div>
+      <div class="sub" id="flowSub">&nbsp;</div>
+    </div>
+    <div class="card">
+      <h2>Link</h2>
+      <div class="sub" id="linkSub">&nbsp;</div>
+    </div>
+  </aside>
+
+  <div class="strip">
+    <canvas id="strip"></canvas>
+    <div class="overlay">distance over the last 20 s · <span style="color:var(--lidar)">lidar</span> ·
+      <span style="color:var(--approach)">radar</span> · <span style="color:var(--fused)">fused</span></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- constants
+const K_FLOW = 1e-4;          // radians of image motion per flow count (ArduPilot's figure, checked on the bench)
+const BEAM_DEG = 8;           // a radar target within this bearing of dead ahead may be what the lidar is hitting
+const RANGE_TOL = 1.0;        // m; the radar reports whole metres
+const RADAR_HOLD = 1.5;       // s to keep a radar target after its last report
+const LIDAR_MIN = 0.03, LIDAR_MAX = 12; // m; readings outside are treated as no return
+const HISTORY_S = 20;
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = { lidar: css("--lidar"), approach: css("--approach"), recede: css("--recede"), fused: css("--fused"),
+            map: css("--map"), line: css("--line"), dim: css("--dim"), text: css("--text") };
+
+function load(key, dflt) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : dflt; } catch (e) { return dflt; } }
+function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
+
+// ---------------------------------------------------------------- state
+const S = {
+  mode: "stare", maxRange: 6,
+  cal: load("fusion.cal", { ux: 1, uy: 0, set: false }),
+  flip: load("fusion.flip", false),
+  t: 0, lastT: null,
+  lidar: null, lidarHist: [], lidarRate: null,
+  flowRate: 0, flowQ: -1, flowFrames: 0,
+  yaw: 0,
+  targets: [],            // {ang, dist, dir, kmh, snr, seen}
+  fused: null,            // {r, vr, vrSrc, vt, radar}
+  map: [], lastMap: null,
+  hist: [],               // {t, lidar, radar:[dist...], fused}
+  rate: 0, rateN: 0, rateT: performance.now(),
+  calRun: null,
+};
+
+// ---------------------------------------------------------------- fusion
+function slope(h) {           // least-squares slope of r over t
+  const n = h.length; if (n < 4) return null;
+  let st = 0, sr = 0; for (const p of h) { st += p.t; sr += p.r; }
+  const mt = st / n, mr = sr / n; let a = 0, b = 0;
+  for (const p of h) { a += (p.t - mt) * (p.r - mr); b += (p.t - mt) ** 2; }
+  return b > 0 ? a / b : null;
+}
+
+function onSample(s) {
+  const t = s.t / 1000;
+  const dt = S.lastT === null ? 0 : t - S.lastT;
+  if (S.lastT !== null && (dt <= 0 || dt > 1)) resetTransient();   // stream restarted
+  S.lastT = t; S.t = t;
+
+  // Lidar: distance, and how fast it is changing.
+  const r = s.mm / 1000;
+  S.lidar = (r >= LIDAR_MIN && r <= LIDAR_MAX) ? r : null;
+  if (S.lidar === null) { S.lidarHist = []; S.lidarRate = null; }
+  else {
+    const last = S.lidarHist[S.lidarHist.length - 1];
+    if (last && Math.abs(last.r - S.lidar) > 0.35) S.lidarHist = [];   // jumped to a different surface
+    S.lidarHist.push({ t, r: S.lidar });
+    while (S.lidarHist.length && t - S.lidarHist[0].t > 0.45) S.lidarHist.shift();
+    S.lidarRate = (S.lidarHist.length >= 6) ? slope(S.lidarHist) : null;
+  }
+
+  // Optical flow: image motion along the calibrated "turn" axis, in radians.
+  const pan = (s.dx * S.cal.ux + s.dy * S.cal.uy) * K_FLOW;
+  if (s.fn > 0) { S.flowQ = s.fq; }
+  S.flowFrames = s.fn;
+  if (dt > 0) { const a = Math.min(1, dt / 0.25); S.flowRate += a * (pan / dt - S.flowRate); }
+  if (S.calRun) { S.calRun.sx += s.dx; S.calRun.sy += s.dy; }
+  if (S.mode === "sweep") S.yaw += pan;
+
+  // Radar: a fresh frame replaces the list; otherwise targets linger briefly.
+  if (s.radar) S.targets = s.radar.map(x => ({ ...x, ang: S.flip ? -x.ang : x.ang, seen: t }));
+  S.targets = S.targets.filter(x => t - x.seen <= RADAR_HOLD);
+
+  // Association: is a radar mover sitting where the lidar beam is hitting?
+  let best = null;
+  if (S.lidar !== null) {
+    for (const x of S.targets) {
+      if (Math.abs(x.ang) <= BEAM_DEG && Math.abs(x.dist - S.lidar) <= RANGE_TOL) {
+        if (!best || Math.abs(x.dist - S.lidar) < Math.abs(best.dist - S.lidar)) best = x;
+      }
+    }
+  }
+  if (S.lidar !== null) {
+    const radarVr = best ? (best.dir ? -1 : 1) * best.kmh / 3.6 : null;   // m/s, negative = closing
+    S.fused = {
+      r: S.lidar, radar: best,
+      vr: S.lidarRate !== null ? S.lidarRate : radarVr,
+      vrSrc: S.lidarRate !== null ? "lidar" : (radarVr !== null ? "radar" : null),
+      radarVr,
+      // Sideways speed of whatever fills the view: image rate x distance. Only meaningful when the rig is still.
+      vt: S.mode === "stare" ? -S.flowRate * S.lidar : null,
+    };
+  } else S.fused = null;
+
+  // Map: while the rig is being turned, each static lidar hit becomes a fixed point.
+  if (S.mode === "sweep" && S.lidar !== null && !best) {
+    const p = { x: S.lidar * Math.sin(S.yaw), y: S.lidar * Math.cos(S.yaw) };
+    if (!S.lastMap || Math.hypot(p.x - S.lastMap.x, p.y - S.lastMap.y) > 0.015) {
+      S.map.push(p); S.lastMap = p;
+      if (S.map.length > 8000) S.map.splice(0, 1000);
+    }
+  }
+
+  S.hist.push({ t, lidar: S.lidar, radar: s.radar ? S.targets.map(x => x.dist) : null, fused: best ? S.lidar : null });
+  while (S.hist.length && t - S.hist[0].t > HISTORY_S) S.hist.shift();
+
+  S.rateN++;
+  const now = performance.now();
+  if (now - S.rateT > 1000) { S.rate = S.rateN * 1000 / (now - S.rateT); S.rateN = 0; S.rateT = now; }
+}
+
+function resetTransient() { S.lidarHist = []; S.lidarRate = null; S.targets = []; S.hist = []; S.flowRate = 0; }
+
+// ---------------------------------------------------------------- readouts
+const $ = id => document.getElementById(id);
+const fmt = (v, d = 2) => v.toFixed(d);
+function sideWord(deg) { return Math.abs(deg) < 2 ? "dead ahead" : Math.abs(deg) + "° " + (deg < 0 ? "left" : "right"); }
+
+function setParas(el, lines) {
+  el.replaceChildren(...lines.map(t => { const p = document.createElement("p"); p.textContent = t; return p; }));
+}
+
+function updateText() {
+  $("lidarBig").replaceChildren(S.lidar === null ? "no return" : fmt(S.lidar, 3) + " ", ...(S.lidar === null ? [] : [Object.assign(document.createElement("small"), { textContent: "m" })]));
+  $("lidarSub").textContent = S.lidarRate === null ? " " :
+    (Math.abs(S.lidarRate) < 0.03 ? "steady" : (S.lidarRate < 0 ? "closing " : "opening ") + fmt(Math.abs(S.lidarRate)) + " m/s");
+
+  $("radarBig").textContent = S.targets.length === 0 ? "none" : S.targets.length + (S.targets.length === 1 ? " mover" : " movers");
+  $("targets").replaceChildren(...S.targets.map(x => {
+    const d = document.createElement("div");
+    d.textContent = `${x.dist} m · ${sideWord(x.ang)} · ${x.dir ? "approaching" : "receding"} ${x.kmh} km/h`;
+    d.style.color = x.dir ? C.approach : C.recede;
+    return d;
+  }));
+
+  const dps = S.flowRate * 180 / Math.PI;
+  $("flowBig").replaceChildren(fmt(Math.abs(dps), 1) + " ", Object.assign(document.createElement("small"), { textContent: "°/s" }));
+  $("flowSub").textContent = (S.flowQ < 0 ? "no frames yet" : "surface quality " + S.flowQ + " / 255") +
+    (S.cal.set ? "" : " · turn axis not calibrated") + (S.mode === "sweep" ? " · heading " + fmt(S.yaw * 180 / Math.PI, 0) + "°" : "");
+
+  $("linkSub").textContent = fmt(S.rate, 0) + " samples/s from the Pico";
+
+  // The fused sentence.
+  const out = [];
+  const f = S.fused;
+  if (f && f.radar) {
+    out.push(`Moving object dead ahead at ${fmt(f.r)} m. The radar alone said ${f.radar.dist} m; the lidar sharpens that to the centimetre.`);
+    if (f.vr !== null) {
+      const lid = S.lidarRate !== null ? `${fmt(Math.abs(S.lidarRate))} m/s by lidar` : null;
+      const rad = `${fmt(Math.abs(f.radarVr))} m/s by radar`;
+      out.push(`It is ${f.vr < 0 ? "closing" : "moving away"}: ${[lid, rad].filter(Boolean).join(", ")}.`);
+    }
+  } else if (f) {
+    out.push(`Surface dead ahead at ${fmt(f.r)} m. The radar sees nothing moving there, so it is standing still.`);
+  } else {
+    out.push("Nothing within lidar range dead ahead.");
+  }
+  if (f && f.vt !== null && Math.abs(f.vt) > 0.06)
+    out.push(`The view is sliding ${f.vt > 0 ? "right" : "left"} at ${fmt(Math.abs(f.vt))} m/s at that distance (true only while the rig is still).`);
+  const others = S.targets.filter(x => !f || x !== f.radar);
+  for (const x of others)
+    out.push(`Radar-only mover about ${x.dist} m away, ${sideWord(x.ang)}, ${x.dir ? "approaching" : "receding"} at ${x.kmh} km/h. Outside the lidar beam, so its range is good to about ±0.5 m.`);
+  if (S.mode === "sweep") out.push(`Mapping: ${S.map.length} wall points placed.`);
+  setParas($("fusionText"), out);
+}
+
+// ---------------------------------------------------------------- drawing
+function fit(cv) {
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(r.width * d) || cv.height !== Math.round(r.height * d)) { cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d); }
+  const g = cv.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0);
+  return { g, w: r.width, h: r.height };
+}
+
+function drawPlan() {
+  const { g, w, h } = fit($("plan"));
+  g.clearRect(0, 0, w, h);
+  const sweep = S.mode === "sweep";
+  const ox = w / 2, oy = sweep ? h / 2 : h - 34;
+  const span = sweep ? Math.min(w, h) / 2 - 16 : Math.min(h - 60, w / 2 - 16);
+  const px = span / S.maxRange;
+  const P = (x, y) => [ox + x * px, oy - y * px];            // world metres -> screen
+  const head = sweep ? S.yaw : 0;
+  const polar = (r, deg) => { const a = head + deg * Math.PI / 180; return P(r * Math.sin(a), r * Math.cos(a)); };
+
+  // range rings
+  g.font = "11px system-ui"; g.textAlign = "left"; g.textBaseline = "middle";
+  const step = S.maxRange > 6 ? 2 : 1;
+  for (let r = step; r <= S.maxRange; r += step) {
+    g.beginPath(); g.strokeStyle = C.line; g.lineWidth = 1;
+    if (sweep) g.arc(ox, oy, r * px, 0, Math.PI * 2); else g.arc(ox, oy, r * px, Math.PI, Math.PI * 2);
+    g.stroke();
+    g.fillStyle = C.dim; g.fillText(r + " m", ox + 4, oy - r * px - 7);
+  }
+  if (!sweep) { g.beginPath(); g.strokeStyle = C.line; g.moveTo(ox - span, oy); g.lineTo(ox + span, oy); g.stroke(); }
+
+  // map points
+  g.fillStyle = C.map;
+  for (const p of S.map) { const [x, y] = P(p.x, p.y); g.fillRect(x - 1.2, y - 1.2, 2.4, 2.4); }
+
+  // radar targets: a box showing the 1 m range step and a few degrees of bearing
+  for (const t of S.targets) {
+    const fusedOne = S.fused && S.fused.radar === t;
+    const col = t.dir ? C.approach : C.recede;
+    const a0 = head + (t.ang - 4) * Math.PI / 180, a1 = head + (t.ang + 4) * Math.PI / 180;
+    const r0 = Math.max(0, t.dist - 0.5) * px, r1 = (t.dist + 0.5) * px;
+    g.beginPath();
+    g.arc(ox, oy, r1, a0 - Math.PI / 2, a1 - Math.PI / 2);
+    g.arc(ox, oy, r0, a1 - Math.PI / 2, a0 - Math.PI / 2, true);
+    g.closePath();
+    g.globalAlpha = fusedOne ? 0.18 : 0.3; g.fillStyle = col; g.fill();
+    g.globalAlpha = 1; g.strokeStyle = col; g.lineWidth = 1.2; g.stroke();
+    if (!fusedOne) {
+      const [lx, ly] = polar(t.dist + 0.5, t.ang);
+      g.fillStyle = col; g.textAlign = "center"; g.textBaseline = "bottom";
+      g.fillText(`${t.dist} m · ${t.kmh} km/h`, lx, ly - 4);
+    }
+  }
+
+  // lidar beam and hit
+  const f = S.fused;
+  const [bx, by] = polar(f ? Math.min(f.r, S.maxRange) : S.maxRange, 0);
+  g.beginPath(); g.moveTo(ox, oy); g.lineTo(bx, by);
+  g.strokeStyle = C.lidar; g.globalAlpha = f ? 0.55 : 0.18; g.lineWidth = 1.5; g.setLineDash(f ? [] : [4, 6]); g.stroke();
+  g.setLineDash([]); g.globalAlpha = 1;
+  if (f && f.r <= S.maxRange) {
+    const col = f.radar ? C.fused : C.lidar;
+    if (f.radar) {
+      g.beginPath(); g.arc(bx, by, 9, 0, Math.PI * 2); g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+      g.beginPath(); g.arc(bx, by, 3.5, 0, Math.PI * 2); g.fillStyle = col; g.fill();
+    } else {
+      // a short wall segment across the beam
+      const [x0, y0] = polar(f.r, -0.0001), ang = head;
+      const tx = Math.cos(ang) * 12, ty = Math.sin(ang) * 12;
+      g.beginPath(); g.moveTo(bx - tx, by - ty); g.lineTo(bx + tx, by + ty); g.strokeStyle = col; g.lineWidth = 3; g.stroke();
+    }
+    // velocity arrow: along the beam from range rate, across it from flow x distance
+    const vr = f.vr || 0, vt = f.vt || 0;
+    if (Math.hypot(vr, vt) > 0.06) {
+      const sc = 45;   // px per m/s
+      const ux = Math.sin(head), uy = Math.cos(head);      // beam direction (world)
+      const rx = Math.cos(head), ry = -Math.sin(head);     // to the right of the beam
+      const vx = ux * vr + rx * vt, vy = uy * vr + ry * vt;
+      const ex = bx + vx * sc, ey = by - vy * sc;
+      g.beginPath(); g.moveTo(bx, by); g.lineTo(ex, ey); g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke();
+      const a = Math.atan2(ey - by, ex - bx);
+      g.beginPath(); g.moveTo(ex, ey); g.lineTo(ex - 8 * Math.cos(a - 0.4), ey - 8 * Math.sin(a - 0.4));
+      g.lineTo(ex - 8 * Math.cos(a + 0.4), ey - 8 * Math.sin(a + 0.4)); g.closePath(); g.fillStyle = "#fff"; g.fill();
+    }
+    g.fillStyle = col; g.textAlign = "left"; g.textBaseline = "middle"; g.font = "12px system-ui";
+    g.fillText((f.radar ? "fused " : "") + fmt(f.r) + " m", bx + 14, by);
+  }
+
+  // the rig
+  g.beginPath(); g.arc(ox, oy, 6, 0, Math.PI * 2); g.fillStyle = C.text; g.fill();
+  $("planNote").textContent = sweep ? "top-down view · the map stays put while the rig turns" : "top-down view · forward is up";
+}
+
+function drawStrip() {
+  const { g, w, h } = fit($("strip"));
+  g.clearRect(0, 0, w, h);
+  const L = 38, R = 10, T = 36, B = 14, pw = w - L - R, ph = h - T - B;
+  const X = t => L + pw * (1 - (S.t - t) / HISTORY_S), Y = r => T + ph * (1 - Math.min(r, S.maxRange) / S.maxRange);
+  g.font = "11px system-ui"; g.fillStyle = C.dim; g.textAlign = "right"; g.textBaseline = "middle";
+  const step = S.maxRange > 6 ? 4 : (S.maxRange > 3 ? 2 : 1);
+  for (let r = 0; r <= S.maxRange; r += step) {
+    g.strokeStyle = C.line; g.beginPath(); g.moveTo(L, Y(r)); g.lineTo(w - R, Y(r)); g.stroke();
+    g.fillText(r + " m", L - 5, Y(r));
+  }
+  // radar: each report as a bar covering its whole-metre uncertainty
+  for (const p of S.hist) {
+    if (!p.radar) continue;
+    for (const d of p.radar) {
+      g.fillStyle = C.approach; g.globalAlpha = 0.28;
+      g.fillRect(X(p.t) - 2, Y(d + 0.5), 4, Y(d - 0.5) - Y(d + 0.5));
+      g.globalAlpha = 1; g.fillRect(X(p.t) - 2, Y(d) - 1, 4, 2);
+    }
+  }
+  // lidar line, broken where there was no return
+  g.strokeStyle = C.lidar; g.lineWidth = 1.6; g.beginPath();
+  let pen = false;
+  for (const p of S.hist) {
+    if (p.lidar === null) { pen = false; continue; }
+    if (pen) g.lineTo(X(p.t), Y(p.lidar)); else g.moveTo(X(p.t), Y(p.lidar));
+    pen = true;
+  }
+  g.stroke();
+  // fused samples
+  g.fillStyle = C.fused;
+  for (const p of S.hist) if (p.fused !== null) { g.beginPath(); g.arc(X(p.t), Y(p.fused), 2.6, 0, Math.PI * 2); g.fill(); }
+}
+
+function frame() { drawPlan(); drawStrip(); updateText(); requestAnimationFrame(frame); }
+
+// ---------------------------------------------------------------- controls
+function seg(id, attr, apply) {
+  const el = $(id);
+  el.addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    for (const x of el.children) x.classList.toggle("on", x === b);
+    apply(b.dataset[attr]);
+  });
+}
+seg("modeSeg", "mode", m => { S.mode = m; S.flowRate = 0; });
+seg("rangeSeg", "r", r => { S.maxRange = +r; });
+$("zeroBtn").onclick = () => { S.yaw = 0; };
+$("clearBtn").onclick = () => { S.map = []; S.lastMap = null; };
+$("flipBtn").onclick = () => { S.flip = !S.flip; save("fusion.flip", S.flip); $("flipBtn").classList.toggle("on", S.flip); };
+$("flipBtn").classList.toggle("on", S.flip);
+
+function banner(text, ms) {
+  const b = $("banner"); b.textContent = text; b.style.display = "block";
+  if (ms) setTimeout(() => { if (b.textContent === text) b.style.display = "none"; }, ms);
+}
+$("calBtn").onclick = () => {
+  if (S.calRun) return;
+  S.calRun = { sx: 0, sy: 0 };
+  banner("Turn the rig steadily to the RIGHT, about a quarter turn. Measuring for 4 seconds…");
+  setTimeout(() => {
+    const { sx, sy } = S.calRun; S.calRun = null;
+    const mag = Math.hypot(sx, sy);
+    if (mag < 1500) { banner("Not enough motion seen. Try again with a bigger, steady turn.", 5000); return; }
+    S.cal = { ux: sx / mag, uy: sy / mag, set: true }; save("fusion.cal", S.cal);
+    S.yaw = 0;
+    banner(`Calibrated. That turn measured ${Math.round(mag * K_FLOW * 180 / Math.PI)}°. If that is far from what you turned, the scale is off.`, 8000);
+  }, 4000);
+};
+
+// ---------------------------------------------------------------- link
+function connect() {
+  const es = new EventSource("/events");
+  es.addEventListener("sample", e => onSample(JSON.parse(e.data)));
+  es.addEventListener("status", e => {
+    const s = JSON.parse(e.data), el = $("status");
+    el.className = "status " + (s.state === "live" ? "live" : s.state === "lost" ? "lost" : "");
+    el.textContent = s.state === "live" ? "live" : s.state + (s.detail ? ": " + s.detail : "");
+  });
+  es.onerror = () => { $("status").className = "status lost"; $("status").textContent = "display server not reachable"; };
+}
+if (location.hash === "#sweep") $("modeSeg").children[1].click();
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
