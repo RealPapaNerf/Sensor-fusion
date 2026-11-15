@@ -8,6 +8,13 @@ laptop is needed. The Pico must already hold `probe.py` and `fusion.py`
 to a text file, and **GPS speed** shows and logs the phone's speed so radar
 reports can be compared with how fast the rig itself is moving.
 
+**Camera** shows the phone's rear camera with each radar contact drawn on it
+(across by bearing, higher up the picture the farther away) plus a clock and
+GPS speed. With the camera on, **Record** also saves that view as a video, so
+contacts can be matched to what was actually there; every frame carries the
+same clock that stamps the log. **Mark** drops a numbered marker into both.
+Mount the phone so its camera looks the same way as the radar.
+
 What follows is the bench history: the probe that identified the sensors, then
 the fusion display built on it.
 
@@ -92,6 +99,9 @@ on, so there is no independent speed to compare against.
   then 15 to 50 km/h with stops.
 - Range: approaching reports out to 99 m (the radar's limit is set to 100),
   median 46 m; 307 of 1,112 reports were beyond 75 m.
+- From the driver afterwards: it picked up a row of parked cars but not a
+  brick wall or houses. Metal vehicles throw a strong echo back; flat walls
+  mostly reflect it away unless met square-on.
 - 463 of 1,112 approaching reports gave a bearing of exactly 0, and the rest
   lean negative, so bearing on scenery looks unreliable.
 - The lidar read its out-of-range value (20000) for 6,155 of 8,589 samples.

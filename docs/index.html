@@ -12,7 +12,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .app { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: auto minmax(0, 1fr) 170px;
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-rows: auto auto minmax(0, 1fr) 170px;
     height: 100%; gap: 10px; padding: 10px; }
   header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .02em; }
@@ -31,8 +31,12 @@
   .lbl { font-size: 12px; color: var(--dim); margin-right: 4px; }
   .plan, .strip, aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; position: relative; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
-  aside { grid-row: 2 / 4; grid-column: 2; overflow-y: auto; padding: 12px; }
-  .strip { grid-column: 1; }
+  aside { grid-row: 2 / 5; grid-column: 2; overflow-y: auto; padding: 12px; }
+  .plan { grid-row: 3; grid-column: 1; }
+  .strip { grid-row: 4; grid-column: 1; }
+  .camwrap { grid-row: 2; grid-column: 1; display: none; background: #000; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .camwrap.on { display: block; }
+  .camwrap canvas { width: 100%; height: auto; max-height: 86vh; object-fit: contain; }
   .card { border-bottom: 1px solid var(--line); padding: 10px 0; }
   .card:first-child { padding-top: 0; }
   .card:last-child { border-bottom: 0; }
@@ -48,9 +52,10 @@
   .overlay { position: absolute; left: 12px; top: 10px; font-size: 12px; color: var(--dim); pointer-events: none; }
   .banner { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: #24405c; color: #fff;
     padding: 8px 14px; border-radius: 8px; font-size: 14px; display: none; text-align: center; max-width: 80%; }
-  @media (max-width: 900px) {
-    .app { grid-template-columns: 1fr; grid-template-rows: auto 55vh 150px auto; height: auto; }
-    aside { grid-row: auto; grid-column: 1; }
+  /* phones, in either orientation: a scrolling column with the camera full width at the top */
+  @media (max-width: 900px), (max-height: 560px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto 55vh 150px auto; height: auto; }
+    aside { grid-row: 5; grid-column: 1; }
   }
 </style>
 </head>
@@ -62,6 +67,8 @@
     <button id="usbBtn" class="primary" title="Read the Pico directly over a USB cable (Chrome on Android or desktop)">Connect USB</button>
     <button id="recBtn" title="Record every sample; pressing again saves a log file">Record</button>
     <button id="gpsBtn" title="Show and log this device's GPS speed, to compare with what the radar reports">GPS speed</button>
+    <button id="camBtn" title="Show this device's rear camera with radar contacts drawn on it; recorded along with the log">Camera</button>
+    <button id="markBtn" title="Drop a numbered marker into the log and the video, for 'I am passing something interesting now'">Mark</button>
     <span><span class="lbl">Rig is</span><span class="seg" id="modeSeg">
       <button data-mode="stare" class="on" title="The rig sits still. Sideways image motion is treated as things moving.">held still</button>
       <button data-mode="sweep" title="You turn the rig by hand. Image motion is treated as the rig turning, and lidar hits build a map.">being turned</button>
@@ -74,6 +81,8 @@
     <button id="clearBtn">Clear map</button>
     <button id="flipBtn" title="Swap radar left and right if targets appear mirrored">Flip radar L/R</button>
   </header>
+
+  <div class="camwrap" id="camwrap"><canvas id="cam"></canvas></div>
 
   <div class="plan">
     <canvas id="plan"></canvas>
@@ -299,7 +308,7 @@ function drawPlan() {
   g.clearRect(0, 0, w, h);
   const sweep = S.mode === "sweep";
   const ox = w / 2, oy = sweep ? h / 2 : h - 34;
-  const span = sweep ? Math.min(w, h) / 2 - 16 : Math.min(h - 60, w / 2 - 16);
+  const span = Math.max(20, sweep ? Math.min(w, h) / 2 - 16 : Math.min(h - 60, w / 2 - 16));
   const px = span / S.maxRange;
   const P = (x, y) => [ox + x * px, oy - y * px];            // world metres -> screen
   const head = sweep ? S.yaw : 0;
@@ -412,7 +421,94 @@ function drawStrip() {
   for (const p of S.hist) if (p.fused !== null) { g.beginPath(); g.arc(X(p.t), Y(p.fused), 2.6, 0, Math.PI * 2); g.fill(); }
 }
 
-function frame() { drawPlan(); drawStrip(); updateText(); requestAnimationFrame(frame); }
+// ---------------------------------------------------------------- camera
+// The rear camera is drawn to a canvas with the radar contacts, a clock and
+// the GPS speed painted on top, and it is that canvas which gets recorded.
+// The saved video therefore carries its own contacts and its own timestamp,
+// so it can be lined up with the log from any single frame.
+const CAM = { on: false, stream: null, video: null, rec: null, chunks: [], mime: "", hfov: 70, marks: 0, markAt: 0 };
+
+async function camStart() {
+  const want = { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } };
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: want, audio: true }); }
+  catch (e) {
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: want, audio: false }); }
+    catch (e2) { banner("Camera: " + e2.message, 6000); return false; }
+  }
+  CAM.stream = stream;
+  CAM.video = Object.assign(document.createElement("video"), { muted: true, playsInline: true, srcObject: stream });
+  await CAM.video.play();
+  CAM.on = true;
+  $("camwrap").classList.add("on"); $("camBtn").classList.add("on");
+  return true;
+}
+function camStop() {
+  if (CAM.rec) return;                       // never drop the camera mid-recording
+  if (CAM.stream) for (const t of CAM.stream.getTracks()) t.stop();
+  CAM.on = false; CAM.stream = null; CAM.video = null;
+  $("camwrap").classList.remove("on"); $("camBtn").classList.remove("on");
+}
+$("camBtn").onclick = () => { CAM.on ? camStop() : camStart(); };
+
+function drawCam() {
+  if (!CAM.on || !CAM.video.videoWidth) return;
+  const cv = $("cam"), vw = CAM.video.videoWidth, vh = CAM.video.videoHeight;
+  if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
+  const g = cv.getContext("2d"), u = Math.max(vw, vh) / 1280;       // scale factor for text and strokes
+  g.drawImage(CAM.video, 0, 0, vw, vh);
+
+  // where the radar is pointing: the middle of the picture, if the two are mounted parallel
+  g.strokeStyle = "rgba(255,255,255,.35)"; g.lineWidth = 1 * u; g.setLineDash([6 * u, 8 * u]);
+  g.beginPath(); g.moveTo(vw / 2, vh * 0.18); g.lineTo(vw / 2, vh); g.stroke(); g.setLineDash([]);
+
+  // radar contacts: across by bearing, up the picture with distance
+  g.font = `600 ${22 * u}px system-ui`; g.textBaseline = "middle";
+  const sorted = [...S.targets].sort((a, b) => b.dist - a.dist);
+  for (const t of sorted) {
+    const col = t.dir ? C.approach : C.recede;
+    const x = Math.max(40 * u, Math.min(vw - 40 * u, vw / 2 + (t.ang / (CAM.hfov / 2)) * (vw / 2)));
+    const y = vh * (0.30 + 0.58 * (1 - Math.min(t.dist, 100) / 100));
+    const label = `${t.dist} m  ${t.kmh} km/h`;
+    const tw = g.measureText(label).width + 20 * u, th = 32 * u;
+    g.strokeStyle = col; g.lineWidth = 3 * u;
+    g.beginPath(); g.moveTo(x, y - th / 2 - 26 * u); g.lineTo(x, y - th / 2); g.stroke();
+    g.beginPath(); g.arc(x, y - th / 2 - 26 * u, 6 * u, 0, Math.PI * 2); g.fillStyle = col; g.fill();
+    const bx = Math.max(4 * u, Math.min(vw - tw - 4 * u, x - tw / 2));
+    g.fillStyle = "rgba(0,0,0,.62)"; g.fillRect(bx, y - th / 2, tw, th);
+    g.strokeRect(bx, y - th / 2, tw, th);
+    g.fillStyle = col; g.textAlign = "left"; g.fillText(label, bx + 10 * u, y + 1 * u);
+  }
+
+  // clock (this device's, the same one that stamps the log), speed, contact count
+  const now = Date.now(), d = new Date(now);
+  const hms = d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  const lines = [hms + "   " + now,
+    (S.gpsKmh === null ? "GPS speed –" : "GPS " + S.gpsKmh.toFixed(0) + " km/h") + "   radar " + S.targets.length +
+    (S.lidar === null ? "" : "   lidar " + S.lidar.toFixed(2) + " m") + (live ? "" : "   NO SENSOR DATA")];
+  g.font = `600 ${20 * u}px ui-monospace, monospace`; g.textAlign = "left";
+  const bw = Math.max(...lines.map(t => g.measureText(t).width)) + 20 * u;
+  g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(0, 0, bw, 62 * u);
+  g.fillStyle = "#fff"; g.fillText(lines[0], 10 * u, 18 * u); g.fillText(lines[1], 10 * u, 44 * u);
+  if (CAM.rec) { g.fillStyle = "#ff4d4d"; g.beginPath(); g.arc(vw - 26 * u, 26 * u, 10 * u, 0, Math.PI * 2); g.fill(); }
+  if (now - CAM.markAt < 1500) {
+    g.font = `700 ${40 * u}px system-ui`; g.textAlign = "center";
+    g.fillStyle = "rgba(0,0,0,.6)"; g.fillRect(vw / 2 - 130 * u, vh * 0.1 - 30 * u, 260 * u, 60 * u);
+    g.fillStyle = "#ffe14d"; g.fillText("MARK " + CAM.marks, vw / 2, vh * 0.1);
+  }
+}
+
+$("markBtn").onclick = () => {
+  CAM.marks++; CAM.markAt = Date.now();
+  if (LOG.on) LOG.lines.push(CAM.markAt + ",M," + CAM.marks);
+  banner("Mark " + CAM.marks + (LOG.on ? "" : " (not recording, so not saved)"), 1200);
+};
+
+// Each part is guarded: one drawing fault must not stop the loop, least of all the recorded camera view.
+function frame() {
+  for (const f of [drawCam, drawPlan, drawStrip, updateText]) { try { f(); } catch (e) { console.error(f.name, e); } }
+  requestAnimationFrame(frame);
+}
 
 // ---------------------------------------------------------------- controls
 function seg(id, attr, apply) {
@@ -591,29 +687,64 @@ async function keepAwake() { try { if ("wakeLock" in navigator) wake = await nav
 document.addEventListener("visibilitychange", () => { if (wake && document.visibilityState === "visible") keepAwake(); });
 
 // --- recording: every sample line, stamped with this device's clock, plus GPS speed lines
-$("recBtn").onclick = () => {
-  const b = $("recBtn");
-  if (!LOG.on) { LOG.lines = []; LOG.on = true; b.textContent = "Stop + save"; b.classList.add("rec"); return; }
-  LOG.on = false; b.textContent = "Record"; b.classList.remove("rec");
-  if (!LOG.lines.length) return;
-  const head = "# sensor-fusion log. D lines: clock_ms,D,pico_ms,lidar_mm,flow_dx,flow_dy,flow_frames,flow_quality,radar_count[,angle,dist_m,approaching,kmh,signal]...  G lines: clock_ms,G,gps_kmh\n";
-  const url = URL.createObjectURL(new Blob([head, LOG.lines.join("\n"), "\n"], { type: "text/plain" }));
-  const a = Object.assign(document.createElement("a"), { href: url, download: "fusion-log-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".txt" });
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
-};
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function videoMime() {
+  const opts = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  return opts.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+}
+function recStart() {
+  LOG.lines = []; LOG.on = true; LOG.base = "fusion-log-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  $("recBtn").textContent = "Stop + save"; $("recBtn").classList.add("rec");
+  if (gpsWatch === null) gpsStart();                 // a drive log without speed is half a log
+  if (CAM.on && window.MediaRecorder) {
+    const out = $("cam").captureStream(30);
+    for (const t of CAM.stream.getAudioTracks()) out.addTrack(t);
+    CAM.mime = videoMime(); CAM.chunks = [];
+    try {
+      CAM.rec = new MediaRecorder(out, { mimeType: CAM.mime || undefined, videoBitsPerSecond: 2500000 });
+      CAM.rec.ondataavailable = e => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
+      CAM.rec.onstart = () => { if (LOG.on) LOG.lines.push(Date.now() + ",V,start," + (CAM.mime || "default")); };
+      CAM.rec.start(1000);
+    } catch (e) { CAM.rec = null; banner("Video recording not available: " + e.message, 6000); }
+  }
+}
+function recStop() {
+  const base = LOG.base;
+  LOG.on = false; $("recBtn").textContent = "Record"; $("recBtn").classList.remove("rec");
+  const head = "# sensor-fusion log. D lines: clock_ms,D,pico_ms,lidar_mm,flow_dx,flow_dy,flow_frames,flow_quality,radar_count[,angle,dist_m,approaching,kmh,signal]...  G: clock_ms,G,gps_kmh  M: clock_ms,M,mark_number  V: clock_ms,V,start,video_type (the video also shows clock_ms on every frame)\n";
+  if (CAM.rec) {
+    const rec = CAM.rec;
+    rec.onstop = () => {
+      const type = (rec.mimeType || CAM.mime || "video/webm").split(";")[0];
+      const blob = new Blob(CAM.chunks, { type });
+      window.__lastVideo = { bytes: blob.size, type };
+      if (blob.size) saveBlob(blob, base.replace("fusion-log", "fusion-video") + (type.includes("mp4") ? ".mp4" : ".webm"));
+      CAM.chunks = []; CAM.rec = null;
+    };
+    rec.stop();
+  }
+  if (LOG.lines.length) saveBlob(new Blob([head, LOG.lines.join("\n"), "\n"], { type: "text/plain" }), base + ".txt");
+}
+$("recBtn").onclick = () => { LOG.on ? recStop() : recStart(); };
 
 // --- GPS speed (speed only; position is not kept)
 let gpsWatch = null;
-$("gpsBtn").onclick = () => {
-  const b = $("gpsBtn");
-  if (gpsWatch !== null) { navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; S.gpsKmh = null; b.classList.remove("on"); return; }
+function gpsStart() {
   if (!("geolocation" in navigator)) { banner("This device has no location service available to the page.", 5000); return; }
-  b.classList.add("on");
+  $("gpsBtn").classList.add("on");
   gpsWatch = navigator.geolocation.watchPosition(p => {
     S.gpsKmh = p.coords.speed === null ? null : p.coords.speed * 3.6;
     if (LOG.on && S.gpsKmh !== null) LOG.lines.push(Date.now() + ",G," + S.gpsKmh.toFixed(1));
   }, e => { banner("GPS: " + e.message, 5000); }, { enableHighAccuracy: true, maximumAge: 0 });
+}
+$("gpsBtn").onclick = () => {
+  if (gpsWatch === null) { gpsStart(); return; }
+  navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; S.gpsKmh = null; $("gpsBtn").classList.remove("on");
 };
 
 // --- self-test feed: exercises the same byte path as USB, with awkward chunking
@@ -639,6 +770,15 @@ function fakeTransport() {
 
 if (location.hash === "#sweep") $("modeSeg").children[1].click();
 if (location.hash === "#selftest") runLink(fakeTransport());
+else if (location.hash === "#selftest-cam") {
+  runLink(fakeTransport());
+  camStart().then(async ok => {
+    console.log("SELFTEST camera started:", ok);
+    if (!ok) return;
+    await sleep(1500); recStart(); await sleep(1000); $("markBtn").click(); await sleep(3000); recStop(); await sleep(1500);
+    console.log("SELFTEST video:", JSON.stringify(window.__lastVideo || null));
+  });
+}
 else if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) { $("usbBtn").classList.remove("primary"); connectServer(); }
 else setStatus("", "not connected: plug the Pico in and tap Connect USB");
 requestAnimationFrame(frame);
