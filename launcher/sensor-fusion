@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Sensor Fusion — this is what the desktop icon launches.
+#
+# Starts the fusion display server (lidar + radar + optical flow on the Pico
+# probe) and opens the page. The server copies its code to the Pico and keeps
+# retrying if the Pico is unplugged, so the order you plug things in does not
+# matter. Close this window or press Ctrl+C to stop it.
+set -uo pipefail
+
+REPO="$HOME/code/sensor-probe"
+PORT=5187  # 5173 Cad-lite … 5184 vidrecorder, 5185 camera, 5186 map builder, 5187 sensor fusion
+URL="http://localhost:$PORT/"
+
+if [ ! -f "$REPO/fusion/server.py" ]; then
+  echo "Sensor Fusion is not at $REPO — if you moved it, edit $HOME/.local/bin/sensor-fusion" >&2
+  read -rp "Press Enter to close. " _
+  exit 1
+fi
+if [ ! -x "$HOME/.venvs/esptool/bin/mpremote" ]; then
+  echo "mpremote is missing from ~/.venvs/esptool (it talks to the Pico)." >&2
+  echo "Install it with:  ~/.venvs/esptool/bin/pip install mpremote" >&2
+  read -rp "Press Enter to close. " _
+  exit 1
+fi
+
+# Already running (e.g. from a terminal)? Just open it.
+if curl -fs --max-time 2 "$URL" >/dev/null 2>&1; then
+  echo "Sensor Fusion is already running at $URL — opening it."
+  xdg-open "$URL" >/dev/null 2>&1 || true
+  sleep 2
+  exit 0
+fi
+
+cd "$REPO"
+echo "Starting Sensor Fusion at $URL  (close this window or press Ctrl+C to stop)"
+echo "Plug in the Pico probe if it is not already connected."
+python3 fusion/server.py --port "$PORT" &
+server=$!
+trap 'kill "$server" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 40); do
+  curl -fs --max-time 1 "$URL" >/dev/null 2>&1 && break
+  sleep 0.25
+done
+xdg-open "$URL" >/dev/null 2>&1 || echo "Open $URL in a browser."
+wait "$server"
