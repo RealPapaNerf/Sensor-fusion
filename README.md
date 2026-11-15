@@ -17,25 +17,32 @@ reflash per experiment.
     $M exec "import probe; probe.mon(0, 115200, 2000)"  # hex, one line per burst
     $M exec "import probe; probe.scan()"                # I2C
 
-| Function | Pico pin         | GPIO | Module pin |
-|----------|------------------|------|------------|
-| UART0 RX | 2                | GP1  | TX         |
-| UART0 TX | 1                | GP0  | RX         |
-| I2C SDA  | 4                | GP2  | SDA        |
-| I2C SCL  | 5                | GP3  | SCL        |
-| UART1 RX | 7                | GP5  | TX         |
-| UART1 TX | 6                | GP4  | RX         |
-| 5 V out  | 40 (VBUS)        |      |            |
-| 3.3 V out| 36 (3V3 OUT)     |      |            |
-| GND      | 3, 8, 38         |      |            |
+This board is a USB-C Pico clone whose silkscreen shows **GPIO numbers**
+(0, 1, GND, 2, 3 ...), not physical pin numbers. Everything below uses those.
+
+| Port / bus            | Pads                 | Module pin      |
+|-----------------------|----------------------|-----------------|
+| port 0, hardware UART | 0 = TX, 1 = RX       | module TX -> RX |
+| port 1, hardware UART | 8 = TX, 9 = RX       | module TX -> RX |
+| port 2, software UART | 1 = TX, 2 = RX       | the LD2451 as soldered |
+| I2C                   | 4 = SDA, 5 = SCL     |                 |
+| 5 V out               | corner pad `Vout`    |                 |
+| 3.3 V out             | pad `3V3`            |                 |
 
 3.3 V logic only. The Pico has no I2C pull-ups of its own and its internal
 ones are too weak to rely on.
+
+Port 2 is a PIO UART. It exists because the radar is soldered with TX on pad 2
+and RX on pad 1 (the wiring instructions gave physical pin numbers and the
+board is labelled in GPIO numbers), and no hardware UART can use those pads.
 
 ## Modules on the bench
 
 - **HLK-LD2451** radar: 5 V supply (>300 mA capacity, ~107 mA average), 3.3 V
   IO, 115200 8N1, per Hi-Link's user manual v1.0. Pins VIN GND OT1 TX RX OT2.
+  Wired: VIN -> Vout, GND -> GND, TX -> pad 2, RX -> pad 1 (port 2). Read
+  working 14 Nov: idle frames `F4 F3 F2 F1 00 00 F8 F7 F6 F5` every ~0.66 s;
+  enable-config, firmware-version and end-config commands all acked.
 - **"Laser R20 D9/A" obstacle-avoidance lidar**, pins C D V G: unidentified,
   presumed I2C (clock, data, V, ground). Supply voltage unknown.
 - **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,

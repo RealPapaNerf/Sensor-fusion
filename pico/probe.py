@@ -7,27 +7,90 @@
 #
 # Pins (3.3 V logic only; the Pico's GPIO is not 5 V tolerant):
 #
-#     UART0   GP0 = TX (pin 1)   GP1 = RX (pin 2)   <- module TX goes to RX
-#     I2C1    GP2 = SDA (pin 4)  GP3 = SCL (pin 5)
-#     UART1   GP4 = TX (pin 6)   GP5 = RX (pin 7)
-#     GND     pins 3, 8, 38      5 V out = VBUS (pin 40)   3.3 V out = pin 36
+# The numbers are GPIO numbers, which is what this board's silkscreen shows
+# (it is a USB-C Pico clone labelled 0, 1, GND, 2, 3 ... not physical pins).
+#
+#     port 0  hardware UART0   GP0 = TX   GP1 = RX   <- module TX goes to RX
+#     port 1  hardware UART1   GP8 = TX   GP9 = RX
+#     port 2  software UART    GP1 = TX   GP2 = RX   <- the LD2451 as soldered
+#     I2C0    GP4 = SDA  GP5 = SCL
+#     5 V out = the corner pad marked Vout     3.3 V out = the pad marked 3V3
+#
+# Port 2 exists because the radar was soldered with TX on GP2 and RX on GP1,
+# which no hardware UART can serve. It is a PIO UART, so it takes any pins.
 
 import time
+import rp2
 from machine import I2C, UART, Pin
 
-UART_PINS = {0: (0, 1), 1: (4, 5)}  # id -> (tx, rx)
-SDA, SCL = 2, 3
+UART_PINS = {0: (0, 1), 1: (8, 9), 2: (1, 2)}  # port -> (tx, rx)
+SOFT = (2,)
+SDA, SCL = 4, 5
 
 BAUDS = (9600, 19200, 38400, 57600, 115200, 128000, 230400,
          250000, 256000, 420000, 460800, 500000, 921600, 1000000)
 
-_baud = {0: 115200, 1: 115200}
+_baud = {0: 115200, 1: 115200, 2: 115200}
+
+
+@rp2.asm_pio(in_shiftdir=rp2.PIO.SHIFT_RIGHT, fifo_join=rp2.PIO.JOIN_RX)
+def _pio_rx():
+    wait(0, pin, 0)
+    set(x, 7)[10]
+    label("bit")
+    in_(pins, 1)
+    jmp(x_dec, "bit")[6]
+    push(noblock)
+    wait(1, pin, 0)
+
+
+@rp2.asm_pio(sideset_init=rp2.PIO.OUT_HIGH, out_init=rp2.PIO.OUT_HIGH,
+             out_shiftdir=rp2.PIO.SHIFT_RIGHT)
+def _pio_tx():
+    pull()
+    set(x, 7).side(0)[7]
+    label("bit")
+    out(pins, 1)[6]
+    jmp(x_dec, "bit")
+    nop().side(1)[6]
+
+
+class SoftUART:
+    """PIO UART with the same read()/write() shape as machine.UART.
+
+    The receive FIFO is 8 bytes deep, so read() must be polled in a tight
+    loop (as _capture and mon do) or bytes are dropped.
+    """
+
+    def __init__(self, baud, tx, rx):
+        rxp = Pin(rx, Pin.IN, Pin.PULL_UP)
+        txp = Pin(tx, Pin.OUT, value=1)
+        self.rx = rp2.StateMachine(0, _pio_rx, freq=8 * baud, in_base=rxp)
+        self.tx = rp2.StateMachine(1, _pio_tx, freq=8 * baud, sideset_base=txp, out_base=txp)
+        self.rx.active(1)
+        self.tx.active(1)
+
+    def read(self):
+        n = self.rx.rx_fifo()
+        if not n:
+            return None
+        get = self.rx.get
+        out = bytearray()
+        while self.rx.rx_fifo():
+            out.append(get() >> 24)
+        return out
+
+    def write(self, data):
+        for b in data:
+            self.tx.put(b)
 
 
 def _uart(u, baud=None):
     if baud:
         _baud[u] = baud
     tx, rx = UART_PINS[u]
+    if u in SOFT:
+        return SoftUART(_baud[u], tx, rx)
     uart = UART(u, baudrate=_baud[u], tx=Pin(tx), rx=Pin(rx), rxbuf=4096, timeout=0)
     # Hold an unconnected RX at the idle level; floating, it reads as stray FF bytes.
     Pin(rx, Pin.ALT, pull=Pin.PULL_UP, alt=Pin.ALT_UART)
@@ -246,7 +309,7 @@ def _pullups():
 
 
 def i2c(freq=100000):
-    return I2C(1, sda=Pin(SDA), scl=Pin(SCL), freq=freq, timeout=50000)
+    return I2C(0, sda=Pin(SDA), scl=Pin(SCL), freq=freq, timeout=50000)
 
 
 def rd(addr, reg, n=1, wide=False, bus=None):
