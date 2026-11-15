@@ -49,6 +49,11 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   `probe.ld_watch()` reported a walker at 4-8 m, 3-7 km/h. Target fields:
   count, alarm, then per target angle (minus 0x80, degrees), distance (m),
   direction (1 = approaching), speed (km/h), signal strength.
+  Chips, read from photos 14 Nov: radar front end marked `SKYRELAY RC2412`
+  (lot P2CF0723202), no datasheet found; controller is a JieLi (`JL` logo,
+  marked BP28842-5SC8, a lot code not a part number) with a 24 MHz crystal;
+  firmware in an external PUYA P25D40SH 4 Mbit SPI flash (SOIC-8); 40 MHz
+  crystal for the radar chip; an unpopulated 4-pad header on the back edge.
 - **"Laser R20 D9/A" obstacle-avoidance lidar**, pins C D V G: unidentified,
   presumed I2C (clock, data, V, ground). Supply voltage unknown.
 - **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,
