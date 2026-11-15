@@ -7,7 +7,7 @@
 # matter. Close this window or press Ctrl+C to stop it.
 set -uo pipefail
 
-REPO="$HOME/code/sensor-probe"
+REPO="$HOME/code/sensor-fusion"
 PORT=5187  # 5173 Cad-lite … 5184 vidrecorder, 5185 camera, 5186 map builder, 5187 sensor fusion
 URL="http://localhost:$PORT/"
 

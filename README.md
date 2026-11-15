@@ -1,4 +1,15 @@
-# sensor-probe
+# sensor-fusion
+
+**Live page: https://realpapanerf.github.io/Sensor-fusion/** — open it in Chrome
+on an Android phone (or a desktop), plug the Pico in with a USB-C data cable,
+and tap **Connect USB**. The phone powers the rig and reads it directly; no
+laptop is needed. The Pico must already hold `probe.py` and `fusion.py`
+(running the desktop app once puts them there). **Record** saves every sample
+to a text file, and **GPS speed** shows and logs the phone's speed so radar
+reports can be compared with how fast the rig itself is moving.
+
+What follows is the bench history: the probe that identified the sensors, then
+the fusion display built on it.
 
 **The Pico version in `pico/` is the one in use.** The Nano 33 BLE firmware
 below was the first attempt; it still works but that board has one UART and no
@@ -43,7 +54,7 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
 `pico/fusion.py` streams all three sensors at 30 samples a second (the radar
 and flow sensor each through a PIO receiver drained by DMA into a ring
 buffer, so nothing is lost while the loop reads the lidar and prints).
-`fusion/server.py` relays the stream to the browser; `fusion/index.html` does
+`fusion/server.py` relays the stream to the browser; `docs/index.html` does
 the fusion and drawing. All three sensors should face the same way.
 
 What it combines:

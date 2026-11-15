@@ -26,6 +26,8 @@
     padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   button:hover { background: #1b2330; }
   button.on { background: #24405c; color: #fff; }
+  button.primary { background: #1f6f43; border-color: #2b8a55; color: #fff; }
+  button.rec { background: #8a2b2b; border-color: #b13a3a; color: #fff; }
   .lbl { font-size: 12px; color: var(--dim); margin-right: 4px; }
   .plan, .strip, aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; position: relative; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
@@ -56,13 +58,16 @@
 <div class="app">
   <header>
     <h1>Sensor fusion</h1>
-    <span id="status" class="status">connecting</span>
+    <span id="status" class="status">not connected</span>
+    <button id="usbBtn" class="primary" title="Read the Pico directly over a USB cable (Chrome on Android or desktop)">Connect USB</button>
+    <button id="recBtn" title="Record every sample; pressing again saves a log file">Record</button>
+    <button id="gpsBtn" title="Show and log this device's GPS speed, to compare with what the radar reports">GPS speed</button>
     <span><span class="lbl">Rig is</span><span class="seg" id="modeSeg">
       <button data-mode="stare" class="on" title="The rig sits still. Sideways image motion is treated as things moving.">held still</button>
       <button data-mode="sweep" title="You turn the rig by hand. Image motion is treated as the rig turning, and lidar hits build a map.">being turned</button>
     </span></span>
     <span><span class="lbl">Range</span><span class="seg" id="rangeSeg">
-      <button data-r="3">3 m</button><button data-r="6" class="on">6 m</button><button data-r="12">12 m</button>
+      <button data-r="3">3 m</button><button data-r="6" class="on">6 m</button><button data-r="12">12 m</button><button data-r="30">30 m</button><button data-r="100">100 m</button>
     </span></span>
     <button id="calBtn" title="Teach the display which way the flow camera sees a right turn">Calibrate turn</button>
     <button id="zeroBtn">Reset heading</button>
@@ -100,6 +105,8 @@
     <div class="card">
       <h2>Link</h2>
       <div class="sub" id="linkSub">&nbsp;</div>
+      <div class="sub" id="gpsSub"></div>
+      <div class="sub" id="recSub"></div>
     </div>
   </aside>
 
@@ -142,6 +149,7 @@ const S = {
   hist: [],               // {t, lidar, radar:[dist...], fused}
   rate: 0, rateN: 0, rateT: performance.now(),
   calRun: null,
+  gpsKmh: null,
 };
 
 // ---------------------------------------------------------------- fusion
@@ -251,6 +259,8 @@ function updateText() {
     (S.cal.set ? "" : " · turn axis not calibrated") + (S.mode === "sweep" ? " · heading " + fmt(S.yaw * 180 / Math.PI, 0) + "°" : "");
 
   $("linkSub").textContent = fmt(S.rate, 0) + " samples/s from the Pico";
+  $("gpsSub").textContent = S.gpsKmh === null ? "" : "GPS speed " + fmt(S.gpsKmh, 0) + " km/h";
+  $("recSub").textContent = LOG.on ? "recording: " + LOG.lines.length + " lines" : "";
 
   // The fused sentence.
   const out = [];
@@ -297,7 +307,7 @@ function drawPlan() {
 
   // range rings
   g.font = "11px system-ui"; g.textAlign = "left"; g.textBaseline = "middle";
-  const step = S.maxRange > 6 ? 2 : 1;
+  const step = S.maxRange <= 6 ? 1 : S.maxRange <= 12 ? 2 : S.maxRange <= 30 ? 5 : 20;
   for (let r = step; r <= S.maxRange; r += step) {
     g.beginPath(); g.strokeStyle = C.line; g.lineWidth = 1;
     if (sweep) g.arc(ox, oy, r * px, 0, Math.PI * 2); else g.arc(ox, oy, r * px, Math.PI, Math.PI * 2);
@@ -374,7 +384,7 @@ function drawStrip() {
   const L = 38, R = 10, T = 36, B = 14, pw = w - L - R, ph = h - T - B;
   const X = t => L + pw * (1 - (S.t - t) / HISTORY_S), Y = r => T + ph * (1 - Math.min(r, S.maxRange) / S.maxRange);
   g.font = "11px system-ui"; g.fillStyle = C.dim; g.textAlign = "right"; g.textBaseline = "middle";
-  const step = S.maxRange > 6 ? 4 : (S.maxRange > 3 ? 2 : 1);
+  const step = S.maxRange <= 3 ? 1 : S.maxRange <= 6 ? 2 : S.maxRange <= 12 ? 4 : S.maxRange <= 30 ? 10 : 25;
   for (let r = 0; r <= S.maxRange; r += step) {
     g.strokeStyle = C.line; g.beginPath(); g.moveTo(L, Y(r)); g.lineTo(w - R, Y(r)); g.stroke();
     g.fillText(r + " m", L - 5, Y(r));
@@ -439,18 +449,198 @@ $("calBtn").onclick = () => {
 };
 
 // ---------------------------------------------------------------- link
-function connect() {
-  const es = new EventSource("/events");
-  es.addEventListener("sample", e => onSample(JSON.parse(e.data)));
-  es.addEventListener("status", e => {
-    const s = JSON.parse(e.data), el = $("status");
-    el.className = "status " + (s.state === "live" ? "live" : s.state === "lost" ? "lost" : "");
-    el.textContent = s.state === "live" ? "live" : s.state + (s.detail ? ": " + s.detail : "");
-  });
-  es.onerror = () => { $("status").className = "status lost"; $("status").textContent = "display server not reachable"; };
+// Two ways in. Served by fusion/server.py on this machine, samples arrive as
+// server-sent events. Anywhere else (GitHub Pages on a phone), "Connect USB"
+// talks to the Pico directly: Web Serial where the browser has it, otherwise
+// WebUSB driving the Pico's serial interface by hand, which is what Chrome on
+// Android needs.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const LOG = { on: false, lines: [] };
+let live = false;
+
+function setStatus(cls, text) { const el = $("status"); el.className = "status " + cls; el.textContent = text; }
+
+function parseLine(line) {            // D,ms,mm,dx,dy,fn,fq,radar...
+  const f = line.split(",");
+  if (f[0] !== "D" || f.length < 8) return null;
+  const v = f.slice(1).map(Number);
+  if (v.some(x => !Number.isFinite(x))) return null;
+  const s = { t: v[0], mm: v[1], dx: v[2], dy: v[3], fn: v[4], fq: v[5] };
+  if (v[6] >= 0) {
+    s.radar = [];
+    for (let i = 7; i + 4 < v.length && s.radar.length < v[6]; i += 5)
+      s.radar.push({ ang: v[i], dist: v[i + 1], dir: v[i + 2], kmh: v[i + 3], snr: v[i + 4] });
+  }
+  return s;
 }
+function sampleToLine(s) {
+  const r = s.radar ? [s.radar.length, ...s.radar.flatMap(x => [x.ang, x.dist, x.dir, x.kmh, x.snr])] : [-1];
+  return ["D", s.t, s.mm, s.dx, s.dy, s.fn, s.fq, ...r].join(",");
+}
+function gotSample(s, line) {
+  if (!live) { live = true; setStatus("live", "live"); }
+  if (LOG.on) LOG.lines.push(Date.now() + "," + (line || sampleToLine(s)));
+  onSample(s);
+}
+function handleLine(line) {
+  line = line.trim();
+  if (line.startsWith("D,")) { const s = parseLine(line); if (s) gotSample(s, line); }
+  else if (line.startsWith("#")) setStatus("", line.slice(1).trim());
+  else if (/ImportError|Traceback|Error:/.test(line))
+    setStatus("lost", "Pico error: " + line + " (run the desktop Sensor Fusion app once to load its code)");
+}
+
+// --- transports: each gives { read(): Promise<Uint8Array|null>, write(Uint8Array), close() }
+async function openWebSerial() {
+  if (!("serial" in navigator)) return null;
+  const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x2e8a }] });
+  await port.open({ baudRate: 115200 });
+  const reader = port.readable.getReader(), writer = port.writable.getWriter();
+  return {
+    read: async () => { const { value, done } = await reader.read(); return done ? null : value; },
+    write: d => writer.write(d),
+    close: async () => { try { await reader.cancel(); writer.releaseLock(); await port.close(); } catch (e) {} },
+  };
+}
+async function openWebUsb() {
+  if (!("usb" in navigator)) return null;
+  const dev = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x2e8a }] });
+  await dev.open();
+  if (dev.configuration === null) await dev.selectConfiguration(1);
+  let ctrl = null, data = null;
+  for (const itf of dev.configuration.interfaces) {
+    const cls = itf.alternates[0].interfaceClass;
+    if (cls === 0x02 && !ctrl) ctrl = itf;          // CDC control
+    if (cls === 0x0A && !data) data = itf;          // CDC data
+  }
+  if (!data) throw new Error("That device has no serial interface.");
+  if (ctrl) { try { await dev.claimInterface(ctrl.interfaceNumber); } catch (e) { ctrl = null; } }
+  await dev.claimInterface(data.interfaceNumber);
+  const eps = data.alternates[0].endpoints;
+  const epIn = eps.find(e => e.direction === "in").endpointNumber;
+  const epOut = eps.find(e => e.direction === "out").endpointNumber;
+  if (ctrl) {
+    const req = { requestType: "class", recipient: "interface", index: ctrl.interfaceNumber };
+    // 115200 8N1, then raise DTR + RTS: MicroPython only transmits once the host says it is listening.
+    await dev.controlTransferOut({ ...req, request: 0x20, value: 0 }, new Uint8Array([0x00, 0xC2, 0x01, 0x00, 0, 0, 8]));
+    await dev.controlTransferOut({ ...req, request: 0x22, value: 0x03 });
+  }
+  return {
+    read: async () => { const r = await dev.transferIn(epIn, 4096); return new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength); },
+    write: d => dev.transferOut(epOut, d),
+    close: async () => { try { await dev.close(); } catch (e) {} },
+  };
+}
+
+async function runLink(tr) {
+  const dec = new TextDecoder();
+  let buf = "";
+  live = false;
+  setStatus("", "starting the sensors…");
+  await tr.write(new Uint8Array([13, 3, 3]));                      // interrupt whatever is running
+  await sleep(400);
+  await tr.write(new TextEncoder().encode("import fusion\r\nfusion.stream()\r\n"));
+  for (;;) {
+    const chunk = await tr.read();
+    if (!chunk) break;
+    buf += dec.decode(chunk, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) { handleLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
+    if (buf.length > 4000) buf = "";
+  }
+}
+
+let busy = false;
+async function connectUsb() {
+  if (busy) return;
+  busy = true;
+  const android = /Android/i.test(navigator.userAgent);
+  const order = android ? [openWebUsb, openWebSerial] : [openWebSerial, openWebUsb];
+  let tr = null, err = null;
+  for (const open of order) {
+    try { tr = await open(); if (tr) break; }
+    catch (e) { err = e; if (e.name === "NotFoundError") break; }   // chooser cancelled
+  }
+  if (!tr) {
+    busy = false;
+    setStatus("lost", err ? (err.name === "NotFoundError" ? "no device chosen" : err.message)
+                          : "This browser cannot reach USB devices. Use Chrome.");
+    return;
+  }
+  keepAwake();
+  try { await runLink(tr); setStatus("lost", "USB link closed. Tap Connect USB."); }
+  catch (e) { setStatus("lost", "USB link dropped (" + e.message + "). Tap Connect USB."); }
+  finally { await tr.close(); busy = false; live = false; }
+}
+$("usbBtn").onclick = connectUsb;
+
+function connectServer() {
+  const es = new EventSource("/events");
+  es.addEventListener("sample", e => gotSample(JSON.parse(e.data)));
+  es.addEventListener("status", e => {
+    const s = JSON.parse(e.data);
+    live = s.state === "live";
+    setStatus(s.state === "live" ? "live" : s.state === "lost" ? "lost" : "", s.state === "live" ? "live" : s.state + (s.detail ? ": " + s.detail : ""));
+  });
+  es.onerror = () => { live = false; setStatus("lost", "display server not reachable"); };
+}
+
+// --- screen stays on while connected
+let wake = null;
+async function keepAwake() { try { if ("wakeLock" in navigator) wake = await navigator.wakeLock.request("screen"); } catch (e) {} }
+document.addEventListener("visibilitychange", () => { if (wake && document.visibilityState === "visible") keepAwake(); });
+
+// --- recording: every sample line, stamped with this device's clock, plus GPS speed lines
+$("recBtn").onclick = () => {
+  const b = $("recBtn");
+  if (!LOG.on) { LOG.lines = []; LOG.on = true; b.textContent = "Stop + save"; b.classList.add("rec"); return; }
+  LOG.on = false; b.textContent = "Record"; b.classList.remove("rec");
+  if (!LOG.lines.length) return;
+  const head = "# sensor-fusion log. D lines: clock_ms,D,pico_ms,lidar_mm,flow_dx,flow_dy,flow_frames,flow_quality,radar_count[,angle,dist_m,approaching,kmh,signal]...  G lines: clock_ms,G,gps_kmh\n";
+  const url = URL.createObjectURL(new Blob([head, LOG.lines.join("\n"), "\n"], { type: "text/plain" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: "fusion-log-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".txt" });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+};
+
+// --- GPS speed (speed only; position is not kept)
+let gpsWatch = null;
+$("gpsBtn").onclick = () => {
+  const b = $("gpsBtn");
+  if (gpsWatch !== null) { navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; S.gpsKmh = null; b.classList.remove("on"); return; }
+  if (!("geolocation" in navigator)) { banner("This device has no location service available to the page.", 5000); return; }
+  b.classList.add("on");
+  gpsWatch = navigator.geolocation.watchPosition(p => {
+    S.gpsKmh = p.coords.speed === null ? null : p.coords.speed * 3.6;
+    if (LOG.on && S.gpsKmh !== null) LOG.lines.push(Date.now() + ",G," + S.gpsKmh.toFixed(1));
+  }, e => { banner("GPS: " + e.message, 5000); }, { enableHighAccuracy: true, maximumAge: 0 });
+};
+
+// --- self-test feed: exercises the same byte path as USB, with awkward chunking
+function fakeTransport() {
+  let t = 0, first = true;
+  return {
+    write: async () => {}, close: async () => {},
+    read: async () => {
+      await sleep(33);
+      let out = "";
+      if (first) { first = false; out += ">>> import fusion\r\n>>> fusion.stream()\r\n# stream start\r\n"; }
+      for (let k = 0; k < 1; k++) {
+        const r = 5 - 0.5 * (t / 1000) % 4;
+        let line = `D,${t},${Math.round(r * 1000)},40,70,2,231,`;
+        line += (t % 198 === 0) ? `2,-2,${Math.round(r)},1,2,200,24,4,0,5,120` : "-1";
+        out += line + "\r\n"; t += 33;
+      }
+      const bytes = new TextEncoder().encode(out);
+      return bytes;
+    },
+  };
+}
+
 if (location.hash === "#sweep") $("modeSeg").children[1].click();
-connect();
+if (location.hash === "#selftest") runLink(fakeTransport());
+else if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) { $("usbBtn").classList.remove("primary"); connectServer(); }
+else setStatus("", "not connected: plug the Pico in and tap Connect USB");
 requestAnimationFrame(frame);
 </script>
 </body>
