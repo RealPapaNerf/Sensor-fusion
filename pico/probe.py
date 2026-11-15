@@ -31,6 +31,7 @@ BAUDS = (9600, 19200, 38400, 57600, 115200, 128000, 230400,
          250000, 256000, 420000, 460800, 500000, 921600, 1000000)
 
 _baud = {0: 115200, 1: 115200, 2: 115200}
+_soft = {}
 
 
 @rp2.asm_pio(in_shiftdir=rp2.PIO.SHIFT_RIGHT, fifo_join=rp2.PIO.JOIN_RX)
@@ -90,7 +91,15 @@ def _uart(u, baud=None):
         _baud[u] = baud
     tx, rx = UART_PINS[u]
     if u in SOFT:
-        return SoftUART(_baud[u], tx, rx)
+        # Reuse the instance: rebuilding the state machines glitches the TX
+        # line, which the module sees as a junk byte ahead of the next command.
+        key = (u, _baud[u])
+        if _soft.get("key") != key:
+            _soft["key"] = key
+            _soft["uart"] = SoftUART(_baud[u], tx, rx)
+            time.sleep_ms(20)
+        _soft["uart"].read()
+        return _soft["uart"]
     uart = UART(u, baudrate=_baud[u], tx=Pin(tx), rx=Pin(rx), rxbuf=4096, timeout=0)
     # Hold an unconnected RX at the idle level; floating, it reads as stray FF bytes.
     Pin(rx, Pin.ALT, pull=Pin.PULL_UP, alt=Pin.ALT_UART)
