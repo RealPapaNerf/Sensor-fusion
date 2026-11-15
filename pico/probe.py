@@ -382,3 +382,58 @@ def dump(addr, start=0, n=64, wide=False):
         except OSError as e:
             print("  %04X: read failed (%s)" % (off, e))
             break
+
+
+# ------------------------------------------------------------ HLK-LD2451 radar
+
+_LD_IDLE = b"\xF4\xF3\xF2\xF1\x00\x00\xF8\xF7\xF6\xF5"
+
+
+def ld_cmd(hexstr, u=2, tries=3):
+    """Send one config command (word + value, hex) and return the ack.
+
+    Retries because the odd command goes unanswered. The command words are
+    inferred from the HLK LD24xx family: FF enable, FE end, 12/13 read and
+    02/03 set detection/sensitivity, A0 firmware version.
+    """
+    r = b""
+    for _ in range(tries):
+        r = send("FD FC FB FA " + hexstr + " 04 03 02 01", u, ms=400)
+        if b"\xFD\xFC\xFB\xFA" in r:
+            break
+    return r
+
+
+def ld_watch(ms=20000, u=2):
+    """Print every frame that reports a target; count the idle ones."""
+    uart = _uart(u)
+    t0 = time.ticks_ms()
+    buf = bytearray()
+    idle = hits = 0
+    while time.ticks_diff(time.ticks_ms(), t0) < ms:
+        d = uart.read()
+        if d:
+            buf.extend(d)
+        while True:
+            i = buf.find(b"\xF4\xF3\xF2\xF1")
+            if i < 0 or len(buf) < i + 6:
+                break
+            n = buf[i + 4] | (buf[i + 5] << 8)
+            end = i + 6 + n + 4
+            if len(buf) < end:
+                break
+            f = bytes(buf[i:end])
+            buf = buf[end:]
+            if f == _LD_IDLE:
+                idle += 1
+                continue
+            hits += 1
+            p = f[6:6 + n]
+            print("%6d ms  %s" % (time.ticks_diff(time.ticks_ms(), t0), _hex(f)))
+            # Field layout from an Arduino forum sketch, not yet confirmed here.
+            for k in range(p[0] if n >= 2 else 0):
+                t = p[2 + 5 * k:7 + 5 * k]
+                if len(t) == 5:
+                    print("          target %d: angle %+d deg, dist %d m, dir byte %d, %d km/h, snr %d (alarm %d)"
+                          % (k + 1, t[0] - 0x80, t[1], t[2], t[3], t[4], p[1]))
+    print("idle frames: %d, target frames: %d, leftover bytes: %d" % (idle, hits, len(buf)))

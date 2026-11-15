@@ -43,6 +43,12 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   Wired: VIN -> Vout, GND -> GND, TX -> pad 2, RX -> pad 1 (port 2). Read
   working 14 Nov: idle frames `F4 F3 F2 F1 00 00 F8 F7 F6 F5` every ~0.66 s;
   enable-config, firmware-version and end-config commands all acked.
+  Settings changed 14 Nov (originals in brackets): direction 2 = both [1],
+  signal threshold 4 [0]. Unchanged: max 100 m, min speed 1 km/h, delay 1 s,
+  trigger count 2. Before the change two watches saw no target; after it,
+  `probe.ld_watch()` reported a walker at 4-8 m, 3-7 km/h. Target fields:
+  count, alarm, then per target angle (minus 0x80, degrees), distance (m),
+  direction (1 = approaching), speed (km/h), signal strength.
 - **"Laser R20 D9/A" obstacle-avoidance lidar**, pins C D V G: unidentified,
   presumed I2C (clock, data, V, ground). Supply voltage unknown.
 - **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,
