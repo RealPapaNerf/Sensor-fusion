@@ -13,6 +13,7 @@
 #     port 0  hardware UART0   GP0 = TX   GP1 = RX   <- module TX goes to RX
 #     port 1  hardware UART1   GP8 = TX   GP9 = RX
 #     port 2  software UART    GP1 = TX   GP2 = RX   <- the LD2451 as soldered
+#     port 3  software UART    GP9 = TX   GP8 = RX   <- port 1 with the wires swapped
 #     I2C0    GP4 = SDA  GP5 = SCL
 #     5 V out = the corner pad marked Vout     3.3 V out = the pad marked 3V3
 #
@@ -23,14 +24,14 @@ import time
 import rp2
 from machine import I2C, UART, Pin
 
-UART_PINS = {0: (0, 1), 1: (8, 9), 2: (1, 2)}  # port -> (tx, rx)
-SOFT = (2,)
+UART_PINS = {0: (0, 1), 1: (8, 9), 2: (1, 2), 3: (9, 8)}  # port -> (tx, rx)
+SOFT = (2, 3)
 SDA, SCL = 4, 5
 
 BAUDS = (9600, 19200, 38400, 57600, 115200, 128000, 230400,
          250000, 256000, 420000, 460800, 500000, 921600, 1000000)
 
-_baud = {0: 115200, 1: 115200, 2: 115200}
+_baud = {0: 115200, 1: 115200, 2: 115200, 3: 19200}
 _soft = {}
 
 
@@ -452,3 +453,77 @@ def r20(n=20, gap_ms=250, addr=0x52):
         d = rd(addr, 0, 4, bus=bus)
         print("%5d   (raw %s)" % ((d[0] << 8) | d[1], _hex(d)))
         time.sleep_ms(gap_ms)
+
+
+# ------------------------------------------------------------ UPixels LC-307 optical flow
+
+# The module is silent until the host sends this start-up sequence at 19200
+# baud. It comes from the vendor init that ArduPilot PR #29729 carries
+# (commented out) for the LC30x family: AA, then AB + four internal
+# parameters + XOR, then one BB DC reg val XOR packet per camera-sensor
+# register, then DD.
+_UP_PARA = b"\x96\x26\xbc\x50"
+_UP_CFG = bytes.fromhex(
+    "128011301b066b4312203a001502628108a006682b20922527971701187919001aa0030013000113"
+    "022087168c018dcc13073310341d3546364037a4387c654666466e209ba49c7cbc0cbda4be7c2009"
+    "0903722f732f74a77512798d7a007efa700f7c847dba5bc276907b55714677dd130f8a108b208e21"
+    "8f409441957e967f97f3130724589748250894b595c080f481e0821b83378439855886ff89158ab8"
+    "8b9939983f9890a091e04020412842264325441f451a46164712480f490d4b0b4c0a4e084f065006"
+    "5a56511b5204534a54265775582b5ad65128521e539e5470575058075c28b0e0b1c0b2b0b34fb463"
+    "b4e3b1f0b2a05500564096509a306a812333a0d0a131a604a20fa32ba40fa52ba79aa81ca911aa16"
+    "ab16ac3cadf0ae57c6aad278d0b4d100c810c912d309d42aee4c7efa74a7784e60e761c86d701e39"
+    "981a"
+)
+
+
+def up_init(u=3, gap_ms=2):
+    uart = _uart(u, 19200)
+    uart.write(b"\xAA")
+    time.sleep_ms(gap_ms)
+    x = 0
+    for b in _UP_PARA:
+        x ^= b
+    uart.write(b"\xAB" + _UP_PARA + bytes([x]))
+    time.sleep_ms(gap_ms)
+    for i in range(0, len(_UP_CFG), 2):
+        reg, val = _UP_CFG[i], _UP_CFG[i + 1]
+        uart.write(bytes([0xBB, 0xDC, reg, val, 0xDC ^ reg ^ val]))
+        time.sleep_ms(gap_ms)
+    uart.write(b"\xDD")
+    print("sent init: %d register writes" % (len(_UP_CFG) // 2))
+
+
+def up_watch(ms=5000, u=3, every=1):
+    """Decode UP-Flow frames: FE 0A xL xH yL yH dtL dtH r r quality ver xor 55."""
+    uart = _uart(u, 19200)
+    t0 = time.ticks_ms()
+    buf = bytearray()
+    good = bad = 0
+    sx = sy = 0
+    while time.ticks_diff(time.ticks_ms(), t0) < ms:
+        d = uart.read()
+        if d:
+            buf.extend(d)
+        while len(buf) >= 14:
+            if buf[0] != 0xFE or buf[1] != 0x0A:
+                buf = buf[1:]
+                continue
+            f = bytes(buf[:14])
+            buf = buf[14:]
+            x = 0
+            for b in f[2:12]:
+                x ^= b
+            if x != f[12] or f[13] != 0x55:
+                bad += 1
+                continue
+            good += 1
+            dx = f[2] | (f[3] << 8)
+            dy = f[4] | (f[5] << 8)
+            dx -= 65536 if dx > 32767 else 0
+            dy -= 65536 if dy > 32767 else 0
+            sx += dx
+            sy += dy
+            if good % every == 0:
+                print("%6d ms  dx %6d  dy %6d  dt %5d us  quality %3d  ver %02X"
+                      % (time.ticks_diff(time.ticks_ms(), t0), dx, dy, f[6] | (f[7] << 8), f[10], f[11]))
+    print("frames ok: %d, bad: %d, sum dx %d, sum dy %d, leftover %d" % (good, bad, sx, sy, len(buf)))

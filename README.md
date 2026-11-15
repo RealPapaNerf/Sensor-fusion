@@ -62,8 +62,14 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   changes faster than 40 Hz. `probe.r20()` polls it. Powered from the 3V3 pad.
   Units are mm: held 36 in (914 mm) from a wall, 100 readings gave median 930,
   range 918-942.
-- **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,
-  no datasheet found. Supply voltage and baud unknown.
+- **LC-307 rev 3** optical flow (UPixels; main chip marked `upixels U30`).
+  Pads GND TX RX VCC. Powered from 3V3. Module TX landed on pad 8 and RX on
+  pad 9, so it is read on software port 3. Silent after power-up until the
+  host sends the vendor start-up sequence (`probe.up_init()`, 161 camera
+  register writes at 19200 baud, taken from ArduPilot PR #29729). It then
+  streams 14-byte frames at 50 Hz: `FE 0A` x(16, LE) y(16, LE) dt-us(16, LE)
+  `E7 03` quality version xor `55`. `probe.up_watch()` decodes them. The
+  init has to be resent after every power cycle.
 
 # Nano 33 BLE firmware
 
