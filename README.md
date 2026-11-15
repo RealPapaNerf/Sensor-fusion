@@ -59,8 +59,9 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   has its own pull-ups. Register 0 gives four bytes: a big-endian 16-bit value
   that looks like distance in mm (seen 264 to 4880, steady to about +/-10 when
   still), then `01 4A`, constant. Everything past that reads FF. The value
-  changes faster than 40 Hz. `probe.r20()` polls it. Units not yet checked
-  against a measured distance.
+  changes faster than 40 Hz. `probe.r20()` polls it. Powered from the 3V3 pad.
+  Units are mm: held 36 in (914 mm) from a wall, 100 readings gave median 930,
+  range 918-942.
 - **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,
   no datasheet found. Supply voltage and baud unknown.
 
