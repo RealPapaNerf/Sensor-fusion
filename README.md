@@ -70,6 +70,11 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   streams 14-byte frames at 50 Hz: `FE 0A` x(16, LE) y(16, LE) dt-us(16, LE)
   `E7 03` quality version xor `55`. `probe.up_watch()` decodes them. The
   init has to be resent after every power cycle.
+  Scale check 14 Nov: hand-slid about 50 cm at 20-25 cm height. The two
+  cleanest strokes summed to 20,400 and 20,900 counts, i.e. 0.96e-4 to
+  1.2e-4 rad per count, which brackets ArduPilot's 1e-4. Return strokes read
+  lower (7,500 to 16,400) with quality dipping to 117-186, so fast motion
+  undercounts. Hand-held, not a calibration.
 
 # Nano 33 BLE firmware
 
