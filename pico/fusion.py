@@ -142,7 +142,15 @@ def stream(hz=30, seconds=0):
                 else:
                     fbuf = fbuf[2:]
 
-            # Radar: F4 F3 F2 F1 lenL lenH [count alarm (5 bytes x count)] F8 F7 F6 F5
+            # Radar: F4 F3 F2 F1 lenL lenH [count alarm (5 bytes x targets)] F8 F7 F6 F5
+            #
+            # The frame is cut at its trailer, not by its length or count
+            # fields. With three or more targets the radar's count (and the
+            # length that goes with it) can overstate what it actually sends
+            # by one or two targets: a drive log showed 99 frames where
+            # reading "count" records ran on into the trailer and the next
+            # frame's header. A target's third byte is always 0 or 1, so the
+            # trailer bytes cannot turn up inside real data.
             rbuf.extend(radar.read())
             rtxt = "-1"
             while True:
@@ -151,25 +159,19 @@ def stream(hz=30, seconds=0):
                     if len(rbuf) > 3:
                         rbuf = rbuf[-3:]
                     break
-                if len(rbuf) < i + 6:
+                j = rbuf.find(b"\xF8\xF7\xF6\xF5", i + 6)
+                if j < 0:
+                    if len(rbuf) - i > 80:      # no trailer in sight: not a real frame
+                        rbuf = rbuf[i + 4:]
+                        continue
                     break
-                n = rbuf[i + 4] | (rbuf[i + 5] << 8)
-                if n > 64:
-                    rbuf = rbuf[i + 4:]
-                    continue
-                end = i + 6 + n + 4
-                if len(rbuf) < end:
-                    break
-                p = rbuf[i + 6:i + 6 + n]
-                rbuf = rbuf[end:]
-                if n < 2:
-                    rtxt = "0"
-                    continue
-                parts = [str(p[0])]
-                for k in range(p[0]):
+                p = rbuf[i + 6:j]
+                rbuf = rbuf[j + 4:]
+                cnt = (len(p) - 2) // 5 if len(p) >= 2 else 0
+                parts = [str(cnt)]
+                for k in range(cnt):
                     t = p[2 + 5 * k:7 + 5 * k]
-                    if len(t) == 5:
-                        parts.append("%d,%d,%d,%d,%d" % (t[0] - 0x80, t[1], t[2], t[3], t[4]))
+                    parts.append("%d,%d,%d,%d,%d" % (t[0] - 0x80, t[1], t[2], t[3], t[4]))
                 rtxt = ",".join(parts)
 
             print("D,%d,%d,%d,%d,%d,%d,%s" % (now, mm, dx, dy, fn, fq, rtxt))

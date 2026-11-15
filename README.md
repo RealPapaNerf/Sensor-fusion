@@ -77,6 +77,30 @@ Limits: the flow camera cannot tell the rig turning from the scene moving, so
 the two modes are a switch, not something it works out; heading drifts; radar
 left/right sign is unverified (there is a flip button).
 
+## Drive test, 14 Nov 2026
+
+Rig held out of a car window, phone reading the Pico over USB from the Pages
+site, 283 s recorded at 30 samples/s with no gaps. GPS speed was not switched
+on, so there is no independent speed to compare against.
+
+- The radar reports stationary scenery as approaching targets. Of 212 frames
+  with two or more approaching targets, 154 gave every target the identical
+  speed and 195 were within 1 km/h, while those targets sat a median 46 m
+  apart in range. Separate objects at different distances all closing at one
+  speed is what a fixed world looks like from a moving car.
+- That shared speed traces a plausible drive: near zero for the first minute,
+  then 15 to 50 km/h with stops.
+- Range: approaching reports out to 99 m (the radar's limit is set to 100),
+  median 46 m; 307 of 1,112 reports were beyond 75 m.
+- 463 of 1,112 approaching reports gave a bearing of exactly 0, and the rest
+  lean negative, so bearing on scenery looks unreliable.
+- The lidar read its out-of-range value (20000) for 6,155 of 8,589 samples.
+- Bug found: with three or more targets the radar's count and length fields
+  can overstate what the frame carries. The Pico parser trusted them and read
+  the trailer and next header as targets (183 bogus records in this log). It
+  now cuts frames at the trailer. `tools/analyze_log.py` drops the bogus
+  records when reading older logs.
+
 ## Modules on the bench
 
 - **HLK-LD2451** radar: 5 V supply (>300 mA capacity, ~107 mA average), 3.3 V
