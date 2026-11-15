@@ -437,3 +437,18 @@ def ld_watch(ms=20000, u=2):
                     print("          target %d: angle %+d deg, dist %d m, dir byte %d, %d km/h, snr %d (alarm %d)"
                           % (k + 1, t[0] - 0x80, t[1], t[2], t[3], t[4], p[1]))
     print("idle frames: %d, target frames: %d, leftover bytes: %d" % (idle, hits, len(buf)))
+
+
+# ------------------------------------------------------------ "Laser R20" lidar
+
+def r20(n=20, gap_ms=250, addr=0x52):
+    """Poll the toy-drone 'Laser R20 D9/A' lidar at I2C 0x52.
+
+    It exposes four bytes from register 0: a big-endian 16-bit reading that
+    looks like distance in mm, then 01 4A, which has never changed.
+    """
+    bus = i2c()
+    for _ in range(n):
+        d = rd(addr, 0, 4, bus=bus)
+        print("%5d   (raw %s)" % ((d[0] << 8) | d[1], _hex(d)))
+        time.sleep_ms(gap_ms)

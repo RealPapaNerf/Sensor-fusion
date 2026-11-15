@@ -54,8 +54,13 @@ board is labelled in GPIO numbers), and no hardware UART can use those pads.
   marked BP28842-5SC8, a lot code not a part number) with a 24 MHz crystal;
   firmware in an external PUYA P25D40SH 4 Mbit SPI flash (SOIC-8); 40 MHz
   crystal for the radar chip; an unpopulated 4-pad header on the back edge.
-- **"Laser R20 D9/A" obstacle-avoidance lidar**, pins C D V G: unidentified,
-  presumed I2C (clock, data, V, ground). Supply voltage unknown.
+- **"Laser R20 D9/A" obstacle-avoidance lidar**, pins C D V G: toy-drone part,
+  chip unidentified. Wired D -> pad 4, C -> pad 5. Answers on I2C at 0x52 and
+  has its own pull-ups. Register 0 gives four bytes: a big-endian 16-bit value
+  that looks like distance in mm (seen 264 to 4880, steady to about +/-10 when
+  still), then `01 4A`, constant. Everything past that reads FF. The value
+  changes faster than 40 Hz. `probe.r20()` polls it. Units not yet checked
+  against a measured distance.
 - **LC-307 rev 3** optical flow, marked 2V8: unidentified toy-drone part,
   no datasheet found. Supply voltage and baud unknown.
 
